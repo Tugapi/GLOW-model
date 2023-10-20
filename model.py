@@ -159,10 +159,11 @@ class ZeroConv2d(nn.Module):
 
 
 class AffineCoupling(nn.Module):
-    def __init__(self, in_channel, filter_size=512, affine=True):
+    def __init__(self, in_channel, filter_size=512, affine=True, use_sigmoid = True):
         super().__init__()
 
         self.affine = affine  # to use affine or additive coupling layer
+        self.use_sigmoid = use_sigmoid  # if to use sigmoid in affine transformation to make training more stable
 
         self.net = nn.Sequential(
             nn.Conv2d(in_channel // 2, filter_size, 3, padding=1),
@@ -182,11 +183,12 @@ class AffineCoupling(nn.Module):
         in_a, in_b = input.chunk(2, 1)
         if self.affine:
             log_s, t = self.net(in_a).chunk(2, 1)
-            # s = torch.exp(log_s)
-            s = F.sigmoid(log_s + 2)
-            # out_a = s * in_a + t
-            out_b = (in_b + t) * s
-
+            if self.use_sigmoid:
+                s = F.sigmoid(log_s + 2)
+                out_b = (in_b + t) * s
+            else:
+                s = torch.exp(log_s)
+                out_b = s * in_b + t
             logdet = torch.sum(torch.log(s).view(input.shape[0], -1), 1)
 
         else:
@@ -201,10 +203,12 @@ class AffineCoupling(nn.Module):
 
         if self.affine:
             log_s, t = self.net(out_a).chunk(2, 1)
-            # s = torch.exp(log_s)
-            s = F.sigmoid(log_s + 2)
-            # in_a = (out_a - t) / s
-            in_b = out_b / s - t
+            if self.use_sigmoid:
+                s = F.sigmoid(log_s + 2)
+                in_b = out_b / s - t
+            else:
+                s = torch.exp(log_s)
+                in_b = (out_b - t) / s
 
         else:
             net_out = self.net(out_a)
@@ -214,7 +218,7 @@ class AffineCoupling(nn.Module):
 
 
 class Flow(nn.Module):
-    def __init__(self, in_channel, affine=True, conv_lu=True):
+    def __init__(self, in_channel, affine=True, conv_lu=True, use_sigmoid=True):
         super().__init__()
 
         self.actnorm = ActNorm(in_channel)
@@ -225,7 +229,7 @@ class Flow(nn.Module):
         else:
             self.invconv = InvConv2d(in_channel)
 
-        self.coupling = AffineCoupling(in_channel, affine=affine)
+        self.coupling = AffineCoupling(in_channel, affine=affine, use_sigmoid=use_sigmoid)
 
     def forward(self, input):
         out, logdet = self.actnorm(input)
