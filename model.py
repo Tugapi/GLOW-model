@@ -9,32 +9,23 @@ logabs = lambda x: torch.log(torch.abs(x))
 
 
 class ActNorm(nn.Module):
-    def __init__(self, in_channel, logdet=True):
+    def __init__(self, in_channel, cal_logdet=True):
         super().__init__()
 
-        self.loc = nn.Parameter(torch.zeros(1, in_channel, 1, 1))
-        self.scale = nn.Parameter(torch.ones(1, in_channel, 1, 1))
+        self.loc = nn.Parameter(torch.zeros(1, in_channel, 1, 1))  # bias parameter
+        self.scale = nn.Parameter(torch.ones(1, in_channel, 1, 1))  # scale parameter
 
         self.register_buffer("initialized", torch.tensor(0, dtype=torch.uint8))
-        self.logdet = logdet
+        self.cal_logdet = cal_logdet  # if to compute log-determinant
 
     def initialize(self, input):
+        '''
+        Data dependent initialization.
+        '''
         with torch.no_grad():
-            flatten = input.permute(1, 0, 2, 3).contiguous().view(input.shape[1], -1)
-            mean = (
-                flatten.mean(1)
-                .unsqueeze(1)
-                .unsqueeze(2)
-                .unsqueeze(3)
-                .permute(1, 0, 2, 3)
-            )
-            std = (
-                flatten.std(1)
-                .unsqueeze(1)
-                .unsqueeze(2)
-                .unsqueeze(3)
-                .permute(1, 0, 2, 3)
-            )
+            flatten = input.permute(1, 0, 2, 3).contiguous().view(input.shape[1], -1)  # C * (B * H * W)
+            mean = flatten.mean(1).unsqueeze(1).unsqueeze(2).unsqueeze(3).permute(1, 0, 2, 3)
+            std = flatten.std(1).unsqueeze(1).unsqueeze(2).unsqueeze(3).permute(1, 0, 2, 3)
 
             self.loc.data.copy_(-mean)
             self.scale.data.copy_(1 / (std + 1e-6))
@@ -50,7 +41,7 @@ class ActNorm(nn.Module):
 
         logdet = height * width * torch.sum(log_abs)
 
-        if self.logdet:
+        if self.cal_logdet:
             return self.scale * (input + self.loc), logdet
 
         else:
@@ -61,13 +52,17 @@ class ActNorm(nn.Module):
 
 
 class InvConv2d(nn.Module):
+    '''
+    Invertible 1*1 conv without LU decomposition.
+    '''
     def __init__(self, in_channel):
         super().__init__()
 
+        # initialize the parameters by sampling a random rotation matrix
         weight = torch.randn(in_channel, in_channel)
-        q, _ = torch.qr(weight)
+        q, _ = torch.linalg.qr(weight) # using QR decomposition to get a rotation (orthogonal) matrix q
         weight = q.unsqueeze(2).unsqueeze(3)
-        self.weight = nn.Parameter(weight)
+        self.weight = nn.Parameter(weight) # C * C * 1 * 1
 
     def forward(self, input):
         _, _, height, width = input.shape
@@ -86,14 +81,19 @@ class InvConv2d(nn.Module):
 
 
 class InvConv2dLU(nn.Module):
+    '''
+    Invertible 1*1 conv with LU decomposition.
+    '''
     def __init__(self, in_channel):
         super().__init__()
 
         weight = np.random.randn(in_channel, in_channel)
         q, _ = la.qr(weight)
         w_p, w_l, w_u = la.lu(q.astype(np.float32))
-        w_s = np.diag(w_u)
-        w_u = np.triu(w_u, 1)
+        # separate the diagonal elements from w_u
+        w_s = np.diag(w_u) # C
+        w_u = np.triu(w_u, 1) # C * C
+
         u_mask = np.triu(np.ones_like(w_u), 1)
         l_mask = u_mask.T
 
@@ -108,7 +108,7 @@ class InvConv2dLU(nn.Module):
         self.register_buffer("s_sign", torch.sign(w_s))
         self.register_buffer("l_eye", torch.eye(l_mask.shape[0]))
         self.w_l = nn.Parameter(w_l)
-        self.w_s = nn.Parameter(logabs(w_s))
+        self.logabs_w_s = nn.Parameter(logabs(w_s))
         self.w_u = nn.Parameter(w_u)
 
     def forward(self, input):
@@ -117,15 +117,20 @@ class InvConv2dLU(nn.Module):
         weight = self.calc_weight()
 
         out = F.conv2d(input, weight)
-        logdet = height * width * torch.sum(self.w_s)
+        logdet = height * width * torch.sum(self.logabs_w_s)
 
         return out, logdet
 
     def calc_weight(self):
+        '''
+        Using the optimized parameter to calculate conv kernel.
+        Note: the diagonal elements of w_l should be replaced by 1, the diagonal elements of w_u should be replaced by 0 and the origin sign of each element of w_s should be added.
+        :return: the calculated conv kernel C * C * 1 * 1
+        '''
         weight = (
             self.w_p
             @ (self.w_l * self.l_mask + self.l_eye)
-            @ ((self.w_u * self.u_mask) + torch.diag(self.s_sign * torch.exp(self.w_s)))
+            @ ((self.w_u * self.u_mask) + torch.diag(self.s_sign * torch.exp(self.logabs_w_s)))
         )
 
         return weight.unsqueeze(2).unsqueeze(3)
@@ -157,14 +162,14 @@ class AffineCoupling(nn.Module):
     def __init__(self, in_channel, filter_size=512, affine=True):
         super().__init__()
 
-        self.affine = affine
+        self.affine = affine  # to use affine or additive coupling layer
 
         self.net = nn.Sequential(
             nn.Conv2d(in_channel // 2, filter_size, 3, padding=1),
             nn.ReLU(inplace=True),
             nn.Conv2d(filter_size, filter_size, 1),
             nn.ReLU(inplace=True),
-            ZeroConv2d(filter_size, in_channel if self.affine else in_channel // 2),
+            ZeroConv2d(filter_size, in_channel if self.affine else in_channel // 2),  # initialize the last conv with 0
         )
 
         self.net[0].weight.data.normal_(0, 0.05)
@@ -175,7 +180,6 @@ class AffineCoupling(nn.Module):
 
     def forward(self, input):
         in_a, in_b = input.chunk(2, 1)
-
         if self.affine:
             log_s, t = self.net(in_a).chunk(2, 1)
             # s = torch.exp(log_s)
