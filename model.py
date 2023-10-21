@@ -137,7 +137,7 @@ class InvConv2dLU(nn.Module):
 
 
 class ZeroConv2d(nn.Module):
-    def __init__(self, in_channel, out_channel, padding=1):
+    def __init__(self, in_channel, out_channel):
         super().__init__()
 
         self.conv = nn.Conv2d(in_channel, out_channel, 3, padding=0)
@@ -145,8 +145,8 @@ class ZeroConv2d(nn.Module):
         self.conv.bias.data.zero_()
         self.scale = nn.Parameter(torch.zeros(1, out_channel, 1, 1))
 
-    def forward(self, input):
-        out = F.pad(input, [1, 1, 1, 1], value=1)
+    def forward(self, input, padding=1):
+        out = F.pad(input, [padding, padding, padding, padding], value=1)
         out = self.conv(out)
         out = out * torch.exp(self.scale * 3)
 
@@ -179,7 +179,7 @@ class AffineCoupling(nn.Module):
         if self.affine:
             log_s, t = self.net(in_a).chunk(2, 1)
             if self.use_sigmoid:
-                s = F.sigmoid(log_s + 2)
+                s = torch.sigmoid(log_s + 2)
                 out_b = (in_b + t) * s
             else:
                 s = torch.exp(log_s)
@@ -199,7 +199,7 @@ class AffineCoupling(nn.Module):
         if self.affine:
             log_s, t = self.net(out_a).chunk(2, 1)
             if self.use_sigmoid:
-                s = F.sigmoid(log_s + 2)
+                s = torch.sigmoid(log_s + 2)
                 in_b = out_b / s - t
             else:
                 s = torch.exp(log_s)
@@ -213,6 +213,9 @@ class AffineCoupling(nn.Module):
 
 
 class Flow(nn.Module):
+    """
+    One step of flow.
+    """
     def __init__(self, in_channel, affine=True, conv_lu=True, use_sigmoid=True):
         super().__init__()
 
@@ -254,14 +257,17 @@ def gaussian_sample(eps, mean, log_sd):
 
 
 class Block(nn.Module):
-    def __init__(self, in_channel, n_flow, split=True, affine=True, conv_lu=True):
+    """
+    A block containing n_flow steps of flow, with squeeze and (optional) split
+    """
+    def __init__(self, in_channel, n_flow, split=True, affine=True, conv_lu=True, use_sigmoid=True):
         super().__init__()
 
         squeeze_dim = in_channel * 4
 
         self.flows = nn.ModuleList()
         for i in range(n_flow):
-            self.flows.append(Flow(squeeze_dim, affine=affine, conv_lu=conv_lu))
+            self.flows.append(Flow(squeeze_dim, affine=affine, conv_lu=conv_lu, use_sigmoid=use_sigmoid))
 
         self.split = split
 
@@ -273,6 +279,7 @@ class Block(nn.Module):
 
     def forward(self, input):
         b_size, n_channel, height, width = input.shape
+        # squeeze operation
         squeezed = input.view(b_size, n_channel, height // 2, 2, width // 2, 2)
         squeezed = squeezed.permute(0, 1, 3, 5, 2, 4)
         out = squeezed.contiguous().view(b_size, n_channel * 4, height // 2, width // 2)
@@ -281,7 +288,7 @@ class Block(nn.Module):
 
         for flow in self.flows:
             out, det = flow(out)
-            logdet = logdet + det
+            logdet += det
 
         if self.split:
             out, z_new = out.chunk(2, 1)
@@ -316,7 +323,6 @@ class Block(nn.Module):
 
             else:
                 zero = torch.zeros_like(input)
-                # zero = F.pad(zero, [1, 1, 1, 1], value=1)
                 mean, log_sd = self.prior(zero).chunk(2, 1)
                 z = gaussian_sample(eps, mean, log_sd)
                 input = z
@@ -337,37 +343,37 @@ class Block(nn.Module):
 
 class Glow(nn.Module):
     def __init__(
-        self, in_channel, n_flow, n_block, affine=True, conv_lu=True
+        self, in_channel, n_flow, n_block, affine=True, conv_lu=True, use_sigmoid=True
     ):
         super().__init__()
 
         self.blocks = nn.ModuleList()
         n_channel = in_channel
         for i in range(n_block - 1):
-            self.blocks.append(Block(n_channel, n_flow, affine=affine, conv_lu=conv_lu))
+            self.blocks.append(Block(n_channel, n_flow, affine=affine, conv_lu=conv_lu, use_sigmoid=use_sigmoid))
             n_channel *= 2
-        self.blocks.append(Block(n_channel, n_flow, split=False, affine=affine))
+        self.blocks.append(Block(n_channel, n_flow, split=False, affine=affine, use_sigmoid=use_sigmoid))
 
     def forward(self, input):
         log_p_sum = 0
-        logdet = 0
+        log_det_sum = 0
         out = input
         z_outs = []
 
         for block in self.blocks:
-            out, det, log_p, z_new = block(out)
+            out, log_det, log_p, z_new = block(out)
             z_outs.append(z_new)
-            logdet = logdet + det
+            log_det_sum += log_det
 
             if log_p is not None:
-                log_p_sum = log_p_sum + log_p
+                log_p_sum += log_p
 
-        return log_p_sum, logdet, z_outs
+        return log_p_sum, log_det_sum, z_outs
 
     def reverse(self, z_list, reconstruct=False):
         for i, block in enumerate(self.blocks[::-1]):
             if i == 0:
-                input = block.reverse(z_list[-1], z_list[-1], reconstruct=reconstruct)
+                input = block.reverse(z_list[-1], z_list[-1], reconstruct=reconstruct)  # no split
 
             else:
                 input = block.reverse(input, z_list[-(i + 1)], reconstruct=reconstruct)
