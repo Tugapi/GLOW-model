@@ -9,14 +9,13 @@ logabs = lambda x: torch.log(torch.abs(x))
 
 
 class ActNorm(nn.Module):
-    def __init__(self, in_channel, cal_logdet=True):
+    def __init__(self, in_channel):
         super().__init__()
 
         self.loc = nn.Parameter(torch.zeros(1, in_channel, 1, 1))  # bias parameter
         self.scale = nn.Parameter(torch.ones(1, in_channel, 1, 1))  # scale parameter
 
         self.register_buffer("initialized", torch.tensor(0, dtype=torch.uint8))
-        self.cal_logdet = cal_logdet  # if to compute log-determinant
 
     def initialize(self, input):
         '''
@@ -41,11 +40,7 @@ class ActNorm(nn.Module):
 
         logdet = height * width * torch.sum(log_abs)
 
-        if self.cal_logdet:
-            return self.scale * (input + self.loc), logdet
-
-        else:
-            return self.scale * (input + self.loc)
+        return self.scale * (input + self.loc), logdet
 
     def reverse(self, output):
         return output / self.scale - self.loc
