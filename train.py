@@ -18,6 +18,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 parser = argparse.ArgumentParser(description="Glow trainer")
 parser.add_argument("--batch", default=16, type=int, help="batch size")
 parser.add_argument("--iter", default=200000, type=int, help="maximum iterations")
+parser.add_argument('--save_iter_freq', type=int, default=10000, help='frequency of saving checkpoints at the end of iterations')
 parser.add_argument(
     "--n_flow", default=32, type=int, help="number of flows in each block"
 )
@@ -30,9 +31,11 @@ parser.add_argument(
 parser.add_argument(
     "--affine", action="store_true", help="use affine coupling instead of additive"
 )
+parser.add_argument("--sigmoid", action="store_true", help="use sigmoid in affine coupling to stabilize training")
 parser.add_argument("--n_bits", default=5, type=int, help="number of bits")
 parser.add_argument("--lr", default=1e-4, type=float, help="learning rate")
 parser.add_argument("--img_size", default=64, type=int, help="image size")
+parser.add_argument("--img_channel", default=3, type=int, help="image channel")
 parser.add_argument("--temp", default=0.7, type=float, help="temperature of sampling")
 parser.add_argument("--n_sample", default=20, type=int, help="number of samples")
 parser.add_argument("path", metavar="PATH", type=str, help="Path to image directory")
@@ -64,26 +67,29 @@ def sample_data(path, batch_size, image_size):
             yield next(loader)
 
 
-def calc_z_shapes(n_channel, input_size, n_flow, n_block):
+def calc_z_shapes(n_channel, input_size,  n_block):
     z_shapes = []
 
     for i in range(n_block - 1):
+        # except the last block, each block halves H and W and doubles C
         input_size //= 2
         n_channel *= 2
 
         z_shapes.append((n_channel, input_size, input_size))
 
     input_size //= 2
-    z_shapes.append((n_channel * 4, input_size, input_size))
+    z_shapes.append((n_channel * 4, input_size, input_size))  # the last block halves H and W and quadruples C
 
     return z_shapes
 
 
-def calc_loss(log_p, logdet, image_size, n_bins):
-    # log_p = calc_log_p([z_list])
-    n_pixel = image_size * image_size * 3
+def calc_loss(log_p, logdet, image_size, n_bins, image_channel=3):
+    """
+    calculate NLL bit per dimension(bits/dim)
+    """
+    n_pixel = image_size * image_size * image_channel
 
-    loss = -log(n_bins) * n_pixel
+    loss = -log(n_bins) * n_pixel  # the log-likelihood of added noise
     loss = loss + logdet + log_p
 
     return (
@@ -98,7 +104,7 @@ def train(args, model, optimizer):
     n_bins = 2.0 ** args.n_bits
 
     z_sample = []
-    z_shapes = calc_z_shapes(3, args.img_size, args.n_flow, args.n_block)
+    z_shapes = calc_z_shapes(args.img_channel, args.img_size, args.n_block)
     for z in z_shapes:
         z_new = torch.randn(args.n_sample, *z) * args.temp
         z_sample.append(z_new.to(device))
@@ -128,7 +134,7 @@ def train(args, model, optimizer):
 
             logdet = logdet.mean()
 
-            loss, log_p, log_det = calc_loss(log_p, logdet, args.img_size, n_bins)
+            loss, log_p, log_det = calc_loss(log_p, logdet, args.img_size, n_bins, args.img_channel)
             model.zero_grad()
             loss.backward()
             # warmup_lr = args.lr * min(1, i * batch_size / (50000 * 10))
@@ -150,7 +156,7 @@ def train(args, model, optimizer):
                         range=(-0.5, 0.5),
                     )
 
-            if i % 10000 == 0:
+            if i % args.save_iter_freq == 0:
                 torch.save(
                     model.state_dict(), f"checkpoint/model_{str(i + 1).zfill(6)}.pt"
                 )
@@ -163,9 +169,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
     print(args)
 
-    model_single = Glow(
-        3, args.n_flow, args.n_block, affine=args.affine, conv_lu=not args.no_lu
-    )
+    model_single = Glow(3, args.n_flow, args.n_block, affine=args.affine, conv_lu=not args.no_lu, use_sigmoid=args.sigmoid)
     model = nn.DataParallel(model_single)
     # model = model_single
     model = model.to(device)
