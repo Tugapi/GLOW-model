@@ -1,3 +1,4 @@
+import os
 from tqdm import tqdm
 import numpy as np
 from PIL import Image
@@ -10,6 +11,7 @@ from torch import nn, optim
 from torch.autograd import Variable, grad
 from torch.utils.data import DataLoader
 from torchvision import datasets, transforms, utils
+from PIL import Image
 
 from model import Glow
 
@@ -39,6 +41,62 @@ parser.add_argument("--img_channel", default=3, type=int, help="image channel")
 parser.add_argument("--temp", default=0.7, type=float, help="temperature of sampling")
 parser.add_argument("--n_sample", default=20, type=int, help="number of samples")
 parser.add_argument("path", metavar="PATH", type=str, help="Path to image directory")
+
+
+IMG_EXTENSIONS = [
+    '.jpg', '.JPG', '.jpeg', '.JPEG',
+    '.png', '.PNG', '.ppm', '.PPM', '.bmp', '.BMP',
+    '.tif', '.TIF', '.tiff', '.TIFF',
+]
+
+
+def is_image_file(filename):
+    return any(filename.endswith(extension) for extension in IMG_EXTENSIONS)
+
+
+def make_dataset(dir):
+    images = []
+    assert os.path.isdir(dir) or os.path.islink(dir), '%s is not a valid directory' % dir
+
+    for root, _, fnames in sorted(os.walk(dir, followlinks=True)):
+        for fname in fnames:
+            if is_image_file(fname):
+                path = os.path.join(root, fname)
+                images.append(path)
+    return images[:len(images)]
+
+
+def default_loader(path):
+    return Image.open(path).convert('RGB')
+
+
+class ImageFolder(datasets):
+
+    def __init__(self, root, transform=None, return_paths=False,
+                 loader=default_loader):
+        imgs = make_dataset(root)
+        if len(imgs) == 0:
+            raise(RuntimeError("Found 0 images in: " + root + "\n"
+                               "Supported image extensions are: " + ",".join(IMG_EXTENSIONS)))
+
+        self.root = root
+        self.imgs = imgs
+        self.transform = transform
+        self.return_paths = return_paths
+        self.loader = loader
+
+    def __getitem__(self, index):
+        path = self.imgs[index]
+        img = self.loader(path)
+        if self.transform is not None:
+            img = self.transform(img)
+        if self.return_paths:
+            return img, path
+        else:
+            return img
+
+    def __len__(self):
+        return len(self.imgs)
 
 
 def sample_data(path, batch_size, image_size):
@@ -100,6 +158,15 @@ def calc_loss(log_p, logdet, image_size, n_bins, image_channel=3):
 
 
 def train(args, model, optimizer):
+    # print and save args
+    print(args)
+    argsDict = args.__dict__
+    with open('checkpoint/setting.txt', 'w') as f:
+        f.writelines('------------------ start ------------------' + '\n')
+        for eachArg, value in argsDict.items():
+            f.writelines(eachArg + ' : ' + str(value) + '\n')
+        f.writelines('------------------- end -------------------')
+
     dataset = iter(sample_data(args.path, args.batch, args.img_size))
     n_bins = 2.0 ** args.n_bits
 
