@@ -179,7 +179,7 @@ def train(args, model, optimizer):
 
     with tqdm(range(args.iter)) as pbar:
         for i in pbar:
-            image, _ = next(dataset)
+            image = next(dataset)
             image = image.to(device)
 
             image = image * 255
