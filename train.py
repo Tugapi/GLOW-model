@@ -12,6 +12,7 @@ from torch.autograd import Variable, grad
 from torch.utils.data import DataLoader
 from torchvision import datasets, transforms, utils
 from PIL import Image
+import torch.utils.data as data
 
 from model import Glow
 
@@ -70,7 +71,7 @@ def default_loader(path):
     return Image.open(path).convert('RGB')
 
 
-class ImageFolder(datasets):
+class ImageFolder(data.Dataset):
 
     def __init__(self, root, transform=None, return_paths=False,
                  loader=default_loader):
@@ -109,7 +110,7 @@ def sample_data(path, batch_size, image_size):
         ]
     )
 
-    dataset = datasets.ImageFolder(path, transform=transform)
+    dataset = ImageFolder(path, transform=transform)
     loader = DataLoader(dataset, shuffle=True, batch_size=batch_size, num_workers=4)
     loader = iter(loader)
 
