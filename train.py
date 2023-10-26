@@ -20,8 +20,11 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 parser = argparse.ArgumentParser(description="Glow trainer")
 parser.add_argument("--batch", default=16, type=int, help="batch size")
+parser.add_argument("--num_threads", default=4, type=int, help="threads for loading data")
+parser.add_argument("--n_epoch", default=50, type=int, help="maximum epochs")
+parser.add_argument("--epoch_count", type=int, default=1, help="the starting epoch count")
 parser.add_argument("--iter", default=200000, type=int, help="maximum iterations")
-parser.add_argument('--save_iter_freq', type=int, default=10000, help='frequency of saving checkpoints at the end of iterations')
+parser.add_argument("--save_epoch_freq", type=int, default=10, help="frequency of saving checkpoints and samples at the end of epochs")
 parser.add_argument(
     "--n_flow", default=32, type=int, help="number of flows in each block"
 )
@@ -100,6 +103,15 @@ class ImageFolder(data.Dataset):
         return len(self.imgs)
 
 
+def get_train_transforms(image_size):
+    transform_list = [
+        transforms.Resize(image_size),
+        transforms.CenterCrop(image_size),
+        transforms.ToTensor(),
+    ]
+    return transforms.Compose(transform_list)
+
+
 def sample_data(path, batch_size, image_size):
     transform = transforms.Compose(
         [
@@ -168,7 +180,9 @@ def train(args, model, optimizer):
             f.writelines(eachArg + ' : ' + str(value) + '\n')
         f.writelines('------------------- end -------------------')
 
-    dataset = iter(sample_data(args.path, args.batch, args.img_size))
+    train_dataset = ImageFolder(args.path, get_train_transforms(args.img_size))
+
+    train_dataloader = torch.utils.data.DataLoader(train_dataset, batch_size=args.batch, shuffle=True, num_workers=args.num_threads, drop_last=True)
     n_bins = 2.0 ** args.n_bits
 
     z_sample = []
@@ -176,61 +190,51 @@ def train(args, model, optimizer):
     for z in z_shapes:
         z_new = torch.randn(args.n_sample, *z) * args.temp
         z_sample.append(z_new.to(device))
+    total_iters = 0  # the total number of training iterations
+    with tqdm(range(args.epoch_count, args.n_epoch + 1)) as pbar:
+        for epoch in pbar:
+            epoch_iter = 0  # the number of training iterations in current epoch, reset to 0 every epoch
+            for i, image in enumerate(train_dataloader):  # inner loop within one epoch
+                image = image.to(device)
 
-    with tqdm(range(args.iter)) as pbar:
-        for i in pbar:
-            image = next(dataset)
-            image = image.to(device)
+                image = image * 255
 
-            image = image * 255
+                if args.n_bits < 8:
+                    image = torch.floor(image / 2 ** (8 - args.n_bits))
 
-            if args.n_bits < 8:
-                image = torch.floor(image / 2 ** (8 - args.n_bits))
+                image = image / n_bins - 0.5
+                total_iters += args.batch
+                epoch_iter += args.batch
+                if epoch == 1 and i == 0:
+                    with torch.no_grad():
+                        log_p, logdet, _ = model.module(image + torch.rand_like(image) / n_bins)
+                        continue
+                else:
+                    log_p, logdet, _ = model(image + torch.rand_like(image) / n_bins)
 
-            image = image / n_bins - 0.5
+                    logdet = logdet.mean()
 
-            if i == 0:
-                with torch.no_grad():
-                    log_p, logdet, _ = model.module(
-                        image + torch.rand_like(image) / n_bins
-                    )
+                    loss, log_p, log_det = calc_loss(log_p, logdet, args.img_size, n_bins, args.img_channel)
+                    optimizer.zero_grad()
+                    loss.backward()
+                    # warmup_lr = args.lr * min(1, i * batch_size / (50000 * 10))
+                    warmup_lr = args.lr
+                    optimizer.param_groups[0]["lr"] = warmup_lr
+                    optimizer.step()
 
-                    continue
+                    pbar.set_description(f"Loss: {loss.item():.5f}; logP: {log_p.item():.5f}; logdet: {log_det.item():.5f}; lr: {warmup_lr:.7f}")
 
-            else:
-                log_p, logdet, _ = model(image + torch.rand_like(image) / n_bins)
-
-            logdet = logdet.mean()
-
-            loss, log_p, log_det = calc_loss(log_p, logdet, args.img_size, n_bins, args.img_channel)
-            model.zero_grad()
-            loss.backward()
-            # warmup_lr = args.lr * min(1, i * batch_size / (50000 * 10))
-            warmup_lr = args.lr
-            optimizer.param_groups[0]["lr"] = warmup_lr
-            optimizer.step()
-
-            pbar.set_description(
-                f"Loss: {loss.item():.5f}; logP: {log_p.item():.5f}; logdet: {log_det.item():.5f}; lr: {warmup_lr:.7f}"
-            )
-
-            if i % 100 == 0:
+            if epoch % args.save_epoch_freq == 0:
                 with torch.no_grad():
                     utils.save_image(
                         model_single.reverse(z_sample).cpu().data,
-                        f"sample/{str(i + 1).zfill(6)}.png",
+                        f"sample/{str(epoch + 1).zfill(6)}.png",
                         normalize=True,
                         nrow=10,
                         range=(-0.5, 0.5),
                     )
-
-            if i % args.save_iter_freq == 0:
-                torch.save(
-                    model.state_dict(), f"checkpoint/model_{str(i + 1).zfill(6)}.pt"
-                )
-                torch.save(
-                    optimizer.state_dict(), f"checkpoint/optim_{str(i + 1).zfill(6)}.pt"
-                )
+                torch.save(model.state_dict(), f"checkpoint/model_{str(epoch + 1).zfill(6)}.pt")
+                torch.save(optimizer.state_dict(), f"checkpoint/optim_{str(epoch + 1).zfill(6)}.pt")
 
 
 if __name__ == "__main__":
