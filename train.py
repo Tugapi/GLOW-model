@@ -1,22 +1,19 @@
 import os
 from tqdm import tqdm
-import numpy as np
-from PIL import Image
 from math import log, sqrt, pi
 
 import argparse
 
 import torch
 from torch import nn, optim
-from torch.autograd import Variable, grad
 from torch.utils.data import DataLoader
-from torchvision import datasets, transforms, utils
+from torchvision import transforms, utils
 from PIL import Image
 import torch.utils.data as data
 
 from model import Glow
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+device = torch.device("cuda")
 
 parser = argparse.ArgumentParser(description="Glow trainer")
 parser.add_argument("--batch", default=16, type=int, help="batch size")
@@ -228,13 +225,13 @@ def train(args, model, optimizer):
                 with torch.no_grad():
                     utils.save_image(
                         model_single.reverse(z_sample).cpu().data,
-                        f"sample/{str(epoch + 1).zfill(6)}.png",
+                        f"sample/{str(epoch).zfill(6)}.png",
                         normalize=True,
                         nrow=10,
                         range=(-0.5, 0.5),
                     )
-                torch.save(model.state_dict(), f"checkpoint/model_{str(epoch + 1).zfill(6)}.pt")
-                torch.save(optimizer.state_dict(), f"checkpoint/optim_{str(epoch + 1).zfill(6)}.pt")
+                torch.save(model.state_dict(), f"checkpoint/model_{str(epoch).zfill(6)}.pt")
+                torch.save(optimizer.state_dict(), f"checkpoint/optim_{str(epoch).zfill(6)}.pt")
 
 
 if __name__ == "__main__":
