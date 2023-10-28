@@ -109,32 +109,6 @@ def get_train_transforms(image_size):
     return transforms.Compose(transform_list)
 
 
-def sample_data(path, batch_size, image_size):
-    transform = transforms.Compose(
-        [
-            transforms.Resize(image_size),
-            transforms.CenterCrop(image_size),
-            transforms.RandomHorizontalFlip(),
-            transforms.ToTensor(),
-        ]
-    )
-
-    dataset = ImageFolder(path, transform=transform)
-    loader = DataLoader(dataset, shuffle=True, batch_size=batch_size, num_workers=4)
-    loader = iter(loader)
-
-    while True:
-        try:
-            yield next(loader)
-
-        except StopIteration:
-            loader = DataLoader(
-                dataset, shuffle=True, batch_size=batch_size, num_workers=4
-            )
-            loader = iter(loader)
-            yield next(loader)
-
-
 def calc_z_shapes(n_channel, input_size,  n_block):
     z_shapes = []
 
