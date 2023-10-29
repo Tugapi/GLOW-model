@@ -1,29 +1,31 @@
 import os
 from tqdm import tqdm
 from math import log, sqrt, pi
+import random
 
 import argparse
 
 import torch
 from torch import nn, optim
 from torch.utils.data import DataLoader
+import torch.backends.cudnn as cudnn
 from torchvision import transforms, utils
 from PIL import Image
 import torch.utils.data as data
 
 from model import Glow
 
-device = torch.device("cuda")
 
 parser = argparse.ArgumentParser(description="Glow trainer")
+parser.add_argument('--gpus', default=0, help='List of GPUs used for training - e.g 0,1,3')
+parser.add_argument('--seed', type=int, default=None, metavar='S', help='random seed')
 parser.add_argument("--batch", default=16, type=int, help="batch size")
 parser.add_argument("--num_threads", default=4, type=int, help="threads for loading data")
 parser.add_argument("--n_epoch", default=50, type=int, help="maximum epochs")
 parser.add_argument("--epoch_count", type=int, default=1, help="the starting epoch count")
-parser.add_argument("--iter", default=200000, type=int, help="maximum iterations")
-parser.add_argument("--save_epoch_freq", type=int, default=10, help="frequency of saving checkpoints and samples at the end of epochs")
+parser.add_argument("--save_epoch_freq", type=int, default=5, help="frequency of saving checkpoints and samples at the end of epochs")
 parser.add_argument(
-    "--n_flow", default=32, type=int, help="number of flows in each block"
+    "--n_flow", default=8, type=int, help="number of flows in each block"
 )
 parser.add_argument("--n_block", default=4, type=int, help="number of blocks")
 parser.add_argument(
@@ -40,7 +42,7 @@ parser.add_argument("--lr", default=1e-4, type=float, help="learning rate")
 parser.add_argument("--img_size", default=64, type=int, help="image size")
 parser.add_argument("--img_channel", default=3, type=int, help="image channel")
 parser.add_argument("--temp", default=0.7, type=float, help="temperature of sampling")
-parser.add_argument("--n_sample", default=20, type=int, help="number of samples")
+parser.add_argument("--n_sample", default=5, type=int, help="number of samples")
 parser.add_argument("path", metavar="PATH", type=str, help="Path to image directory")
 
 
@@ -141,15 +143,7 @@ def calc_loss(log_p, logdet, image_size, n_bins, image_channel=3):
     )
 
 
-def train(args, model, optimizer):
-    # print and save args
-    print(args)
-    argsDict = args.__dict__
-    with open('checkpoint/setting.txt', 'w') as f:
-        f.writelines('------------------ start ------------------' + '\n')
-        for eachArg, value in argsDict.items():
-            f.writelines(eachArg + ' : ' + str(value) + '\n')
-        f.writelines('------------------- end -------------------')
+def train(args, model, optimizer, device):
 
     train_dataset = ImageFolder(args.path, get_train_transforms(args.img_size))
 
@@ -210,13 +204,32 @@ def train(args, model, optimizer):
 
 if __name__ == "__main__":
     args = parser.parse_args()
+    # print and save args
     print(args)
+    argsDict = args.__dict__
+    with open('checkpoint/setting.txt', 'w') as f:
+        f.writelines('------------------ start ------------------' + '\n')
+        for eachArg, value in argsDict.items():
+            f.writelines(eachArg + ' : ' + str(value) + '\n')
+        f.writelines('------------------- end -------------------')
+    if args.seed is None:
+        args.seed = random.randint(1, 10000)
+    random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    if args.gpus:
+        torch.cuda.manual_seed_all(args.seed)
+
+    if args.gpus is not None:
+        args.gpus = [int(i) for i in args.gpus.split(',')]
+        device = 'cuda:' + str(args.gpus[0])
+        cudnn.benchmark = True
+    else:
+        device = 'cpu'
 
     model_single = Glow(3, args.n_flow, args.n_block, affine=args.affine, conv_lu=not args.no_lu, use_sigmoid=args.sigmoid)
-    model = nn.DataParallel(model_single)
-    # model = model_single
+    model = nn.DataParallel(model_single, args.gpus)
     model = model.to(device)
 
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
 
-    train(args, model, optimizer)
+    train(args, model, optimizer, device)
