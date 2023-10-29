@@ -17,7 +17,7 @@ from model import Glow
 
 
 parser = argparse.ArgumentParser(description="Glow trainer")
-parser.add_argument('--gpus', default=0, help='List of GPUs used for training - e.g 0,1,3')
+parser.add_argument('--gpus', type=str, default='0', help='List of GPUs used for training - e.g 0,1,3')
 parser.add_argument('--seed', type=int, default=None, metavar='S', help='random seed')
 parser.add_argument("--batch", default=16, type=int, help="batch size")
 parser.add_argument("--num_threads", default=4, type=int, help="threads for loading data")
