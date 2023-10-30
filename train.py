@@ -195,8 +195,8 @@ def train(args, model, optimizer, device):
                         model_single.reverse(z_sample).cpu().data,
                         f"sample/{str(epoch).zfill(6)}.png",
                         normalize=True,
-                        nrow=10,
-                        range=(-0.5, 0.5),
+                        nrow=5,
+                        value_range=(-0.5, 0.5),
                     )
                 torch.save(model.state_dict(), f"checkpoint/model_{str(epoch).zfill(6)}.pt")
                 torch.save(optimizer.state_dict(), f"checkpoint/optim_{str(epoch).zfill(6)}.pt")
