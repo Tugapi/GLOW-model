@@ -17,12 +17,12 @@ from model import Glow
 
 
 parser = argparse.ArgumentParser(description="Glow trainer")
-parser.add_argument('--gpus', type=str, default='0', help='List of GPUs used for training - e.g 0,1,3')
+parser.add_argument('--gpus', type=str, default='0', help='List of GPUs used for training - e.g 0,1,3, ''for cpu')
 parser.add_argument('--seed', type=int, default=None, metavar='S', help='random seed')
 parser.add_argument("--batch", default=16, type=int, help="batch size")
 parser.add_argument("--num_threads", default=4, type=int, help="threads for loading data")
 parser.add_argument("--n_epoch", default=50, type=int, help="maximum epochs")
-parser.add_argument("--epoch_count", type=int, default=1, help="the starting epoch count")
+parser.add_argument("--epoch_count", type=int, default=1, help="the starting epoch count (can automatically gain, no need to declare)")
 parser.add_argument("--save_epoch_freq", type=int, default=5, help="frequency of saving checkpoints and samples at the end of epochs")
 parser.add_argument(
     "--n_flow", default=8, type=int, help="number of flows in each block"
@@ -36,7 +36,7 @@ parser.add_argument(
 parser.add_argument(
     "--affine", action="store_true", help="use affine coupling instead of additive"
 )
-parser.add_argument("--sigmoid", action="store_true", help="use sigmoid in affine coupling to stabilize training")
+parser.add_argument("--no_sigmoid", action="store_false", help="don't use sigmoid in affine coupling to stabilize training")
 parser.add_argument("--n_bits", default=5, type=int, help="number of bits")
 parser.add_argument("--lr", default=1e-4, type=float, help="learning rate")
 parser.add_argument("--img_size", default=64, type=int, help="image size")
@@ -44,7 +44,9 @@ parser.add_argument("--img_channel", default=3, type=int, help="image channel")
 parser.add_argument("--temp", default=0.7, type=float, help="temperature of sampling")
 parser.add_argument("--n_sample", default=5, type=int, help="number of samples")
 parser.add_argument("path", metavar="PATH", type=str, help="Path to image directory")
-
+parser.add_argument("--checkpoint_path", metavar="PATH", default="checkpoint/", type=str, help="Path to image directory")
+parser.add_argument("--sample_path", metavar="PATH", default="sample/", type=str, help="Path to image directory")
+parser.add_argument('--resume', default='', type=str, metavar='PATH', help='Path to the latest checkpoint (default: none)')
 
 IMG_EXTENSIONS = [
     '.jpg', '.JPG', '.jpeg', '.JPEG',
@@ -193,21 +195,28 @@ def train(args, model, optimizer, device):
                 with torch.no_grad():
                     utils.save_image(
                         model_single.reverse(z_sample).cpu().data,
-                        f"sample/{str(epoch).zfill(6)}.png",
+                        os.path.join(args.sample_path, f"{str(epoch).zfill(6)}.png"),
                         normalize=True,
                         nrow=5,
                         value_range=(-0.5, 0.5),
                     )
-                torch.save(model.state_dict(), f"checkpoint/model_{str(epoch).zfill(6)}.pt")
-                torch.save(optimizer.state_dict(), f"checkpoint/optim_{str(epoch).zfill(6)}.pt")
+                torch.save({'epoch': epoch,
+                            'model_state_dict': model.state_dict(),
+                            'optimizer_state_dict': optimizer.state_dict()},
+                           os.path.join(args.checkpoint_path, f"model_{str(epoch).zfill(6)}.pt")
+                           )
 
 
 if __name__ == "__main__":
     args = parser.parse_args()
+    if not os.path.exists(args.sample_path):
+        os.makedirs(args.sample_path)
+    if not os.path.exists(args.checkpoint_path):
+        os.makedirs(args.checkpoint_path)
     # print and save args
     print(args)
     argsDict = args.__dict__
-    with open('checkpoint/setting.txt', 'w') as f:
+    with open(os.path.join(args.checkpoint_path, 'setting.txt'), 'w') as f:
         f.writelines('------------------ start ------------------' + '\n')
         for eachArg, value in argsDict.items():
             f.writelines(eachArg + ' : ' + str(value) + '\n')
@@ -219,17 +228,25 @@ if __name__ == "__main__":
     if args.gpus:
         torch.cuda.manual_seed_all(args.seed)
 
-    if args.gpus is not None:
+    if args.gpus:
         args.gpus = [int(i) for i in args.gpus.split(',')]
         device = 'cuda:' + str(args.gpus[0])
         cudnn.benchmark = True
     else:
         device = 'cpu'
 
-    model_single = Glow(3, args.n_flow, args.n_block, affine=args.affine, conv_lu=not args.no_lu, use_sigmoid=args.sigmoid)
+    model_single = Glow(3, args.n_flow, args.n_block, affine=args.affine, conv_lu=not args.no_lu, use_sigmoid=args.no_sigmoid)
     model = nn.DataParallel(model_single, args.gpus)
     model = model.to(device)
 
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
+
+    if args.resume:
+        assert os.path.isfile(args.resume), "Path to the latest checkpoint is not valid"
+        print("=> loading checkpoint '{}'".format(args.resume))
+        checkpoint = torch.load(args.resume, map_location=device)
+        model.load_state_dict(checkpoint['model_state_dict'])
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        args.epoch_count = checkpoint['epoch'] + 1
 
     train(args, model, optimizer, device)
